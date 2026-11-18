@@ -6,13 +6,5 @@
     "src": "data/kavalergardskaya-lk2/cloud.js",
     "points": 9566104,
     "date": "2026-11-18"
-  },
-  {
-    "id": "sample",
-    "title": "Демо-облако (тест)",
-    "description": "Тестовое облако из комплекта Potree. Удали его через админку, когда добавишь своё.",
-    "src": "data/sample/cloud.js",
-    "points": 3145014,
-    "date": "2026-11-17"
   }
 ]
