@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -21,6 +22,79 @@ namespace ScanPublisher
         public string Profile = "web";
         public bool Push = true;
         public bool OpenInBrowser = false;
+    }
+
+    internal class GithubSettings
+    {
+        public string Owner;
+        public string Repo;
+        public string Branch = "main";
+        public string Token;
+
+        public static string SettingsPath
+        {
+            get { return Path.Combine(Pipeline.Root, "settings.json"); }
+        }
+
+        public static GithubSettings Load()
+        {
+            GithubSettings s = new GithubSettings();
+            try
+            {
+                if (File.Exists(SettingsPath))
+                {
+                    string text = File.ReadAllText(SettingsPath, Encoding.UTF8);
+                    string owner = Pipeline.JsonField(text, "owner");
+                    string repo = Pipeline.JsonField(text, "repo");
+                    string branch = Pipeline.JsonField(text, "branch");
+                    string token = Pipeline.JsonField(text, "token");
+                    if (owner != null) s.Owner = owner;
+                    if (repo != null) s.Repo = repo;
+                    if (branch != null && branch.Length > 0) s.Branch = branch;
+                    if (token != null) s.Token = token;
+                }
+            }
+            catch (Exception) { }
+            if (string.IsNullOrEmpty(s.Owner) || string.IsNullOrEmpty(s.Repo))
+            {
+                // автоопределение от текущего remote
+                try
+                {
+                    string remote = Pipeline.RunCapture("git", "remote get-url origin", Pipeline.Root, null, null);
+                    System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(remote, @"github\.com[:/](?<o>[^/\s]+)/(?<r>[^/\s\.]+)");
+                    if (m.Success)
+                    {
+                        s.Owner = m.Groups["o"].Value;
+                        s.Repo = m.Groups["r"].Value;
+                    }
+                }
+                catch (Exception) { }
+            }
+            return s;
+        }
+
+        public bool IsSet { get { return !string.IsNullOrEmpty(Owner) && !string.IsNullOrEmpty(Repo); } }
+
+        public string RepoDisplay { get { return (Owner ?? "") + "/" + (Repo ?? ""); } }
+
+        // базовый URL GitHub Pages для просмотра облака
+        public string PagesBase
+        {
+            get { return "https://" + (Owner ?? "") + ".github.io/" + (Repo ?? ""); }
+        }
+
+        public void Save()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("{\r\n");
+            sb.Append("  \"owner\": \"").Append(Pipeline.JsonEscape(Owner ?? "")).Append("\",\r\n");
+            sb.Append("  \"repo\": \"").Append(Pipeline.JsonEscape(Repo ?? "")).Append("\",\r\n");
+            sb.Append("  \"branch\": \"").Append(Pipeline.JsonEscape(Branch ?? "main")).Append("\",\r\n");
+            sb.Append("  \"token\": \"").Append(Pipeline.JsonEscape(Token ?? "")).Append("\"\r\n");
+            sb.Append("}\r\n");
+            try { File.WriteAllText(SettingsPath, sb.ToString(), new UTF8Encoding(false)); }
+            catch (Exception) { }
+        }
     }
 
     internal static class Pipeline
@@ -56,7 +130,7 @@ namespace ScanPublisher
             return s;
         }
 
-        private static string RunCapture(string exe, string args, string workDir, Action<string> log, Action<int> progress)
+        internal static string RunCapture(string exe, string args, string workDir, Action<string> log, Action<int> progress)
         {
             ProcessStartInfo psi = new ProcessStartInfo(exe, args);
             psi.WorkingDirectory = workDir;
@@ -182,6 +256,26 @@ namespace ScanPublisher
             // 4. git
             if (o.Push)
             {
+                // применяем выбранное подключение, если настроены owner/repo
+                GithubSettings gs = GithubSettings.Load();
+                if (gs.IsSet)
+                {
+                    try
+                    {
+                        string current = RunCapture("git", "remote get-url origin", Root, null, null);
+                        bool has = current.Trim().Length > 0;
+                        string expected = string.IsNullOrEmpty(gs.Token)
+                            ? "https://github.com/" + gs.Owner + "/" + gs.Repo + ".git"
+                            : "https://" + gs.Owner + ":" + gs.Token + "@github.com/" + gs.Owner + "/" + gs.Repo + ".git";
+                        if (!has || !current.Trim().Equals(expected, StringComparison.Ordinal))
+                        {
+                            say("Настраиваю remote origin под выбранный аккаунт...");
+                            ConfigureRemote(gs, say);
+                        }
+                    }
+                    catch (Exception ex) { say("remote origin: " + ex.Message); }
+                }
+
                 say("Коммит и отправка на GitHub...");
                 Run("git", "add -- .gitignore clouds.json " + Quote("data/" + id), Root, say, null);
                 RunCapture("git", "diff --cached --quiet", Root, null, null); // если нечего коммитить — не ошибка
@@ -217,7 +311,7 @@ namespace ScanPublisher
             return 0;
         }
 
-        private static string JsonEscape(string s)
+        internal static string JsonEscape(string s)
         {
             if (s == null) return "";
             StringBuilder sb = new StringBuilder();
@@ -239,7 +333,7 @@ namespace ScanPublisher
             return sb.ToString();
         }
 
-        private static string JsonField(string obj, string name)
+        internal static string JsonField(string obj, string name)
         {
             Match m = Regex.Match(obj, "\"" + name + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
             if (!m.Success) return null;
@@ -312,6 +406,14 @@ namespace ScanPublisher
 
         public static string BuildLink(string src, string title)
         {
+            GithubSettings s = GithubSettings.Load();
+            if (s.IsSet)
+            {
+                string abs = s.PagesBase + "/" + src;
+                return s.PagesBase + "/website/index.html#cloud=" +
+                    Uri.EscapeDataString(abs) + "&name=" + Uri.EscapeDataString(title ?? "");
+            }
+
             string remote = "";
             try
             {
@@ -325,9 +427,69 @@ namespace ScanPublisher
 
             string owner = m.Groups["o"].Value;
             string repo = m.Groups["r"].Value;
-            string abs = "https://" + owner + ".github.io/" + repo + "/" + src;
+            string absUrl = "https://" + owner + ".github.io/" + repo + "/" + src;
             return "https://" + owner + ".github.io/" + repo + "/website/index.html#cloud=" +
-                Uri.EscapeDataString(abs) + "&name=" + Uri.EscapeDataString(title ?? "");
+                Uri.EscapeDataString(absUrl) + "&name=" + Uri.EscapeDataString(title ?? "");
+        }
+
+        // Настраивает origin под выбранные owner/repo/token и возвращает сообщение о состоянии.
+        public static string ConfigureRemote(GithubSettings s, Action<string> log)
+        {
+            try
+            {
+                RunCapture("git", "remote remove origin", Root, log, null);
+            }
+            catch (Exception) { }
+            string url = string.IsNullOrEmpty(s.Token)
+                ? "https://github.com/" + s.Owner + "/" + s.Repo + ".git"
+                : "https://" + s.Owner + ":" + s.Token + "@github.com/" + s.Owner + "/" + s.Repo + ".git";
+            RunCapture("git", "remote add origin " + Quote(url), Root, log, null);
+            return url;
+        }
+
+        // Проверка токена и репозитория через GitHub API. Возвращает (owner, repo) то, что реально доступно.
+        public static string VerifyGithub(GithubSettings s, Action<string> log)
+        {
+            string baseUrl = "https://api.github.com";
+            using (WebClient wc = new WebClient())
+            {
+                wc.Encoding = Encoding.UTF8;
+                wc.Headers[HttpRequestHeader.UserAgent] = "ScanPublisher";
+                wc.Headers[HttpRequestHeader.Authorization] = "token " + s.Token;
+                wc.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
+                try
+                {
+                    string user = wc.DownloadString(baseUrl + "/user");
+                    string login = JsonField(user, "login");
+                    if (string.IsNullOrEmpty(login)) throw new Exception("Не удалось определить логин по токену.");
+                    if (log != null) log("Токен действителен, аккаунт: " + login);
+                    if (string.IsNullOrEmpty(s.Owner)) s.Owner = login;
+                }
+                catch (WebException ex)
+                {
+                    HttpWebResponse r = ex.Response as HttpWebResponse;
+                    if (r != null && (int)r.StatusCode == 401) throw new Exception("Неверный токен (401). Проверьте токен на https://github.com/settings/tokens.");
+                    if (r != null && (int)r.StatusCode == 403) throw new Exception("Доступ запрещён (403). Возможно, истёкли права токена. Нужен scope: repo (или fine-grained: Contents read/write, Metadata read).");
+                    throw new Exception("Ошибка подключения к GitHub API: " + ex.Message);
+                }
+
+                // проверяем доступ к репозиторию
+                try
+                {
+                    string repo = wc.DownloadString(baseUrl + "/repos/" + s.Owner + "/" + s.Repo);
+                    string full = JsonField(repo, "full_name");
+                    if (log != null) log("Репозиторий доступен: " + (full ?? (s.Owner + "/" + s.Repo)));
+                }
+                catch (WebException ex)
+                {
+                    HttpWebResponse r = ex.Response as HttpWebResponse;
+                    int code = r != null ? (int)r.StatusCode : 0;
+                    if (code == 404) throw new Exception("Репозиторий " + s.Owner + "/" + s.Repo + " не найден или у токена нет к нему доступа (404).");
+                    if (code == 401 || code == 403) throw new Exception("Нет прав на репозиторий " + s.Owner + "/" + s.Repo + " (" + code + "). Проверьте права токена и Owner/Repo.");
+                    throw new Exception("Ошибка проверки репозитория: " + ex.Message);
+                }
+                return s.Owner + "/" + s.Repo;
+            }
         }
 
         public static void TryOpen(string link)
@@ -499,21 +661,28 @@ namespace ScanPublisher
             l5.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             Controls.Add(l5);
 
-            txtLink.SetBounds(66, 551, 598, 23);
+            txtLink.SetBounds(66, 551, 534, 23);
             txtLink.ReadOnly = true;
             txtLink.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(txtLink);
 
+            Button btnSettings = new Button();
+            btnSettings.Text = "Настройки GitHub";
+            btnSettings.SetBounds(608, 550, 96, 25);
+            btnSettings.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            btnSettings.Click += delegate { ShowSettings(); };
+            Controls.Add(btnSettings);
+
             Button btnOpen = new Button();
             btnOpen.Text = "Открыть";
-            btnOpen.SetBounds(672, 550, 72, 25);
+            btnOpen.SetBounds(708, 550, 60, 25);
             btnOpen.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             btnOpen.Click += delegate { if (txtLink.Text.Length > 0) Pipeline.TryOpen(txtLink.Text); };
             Controls.Add(btnOpen);
 
             Button btnCopy = new Button();
             btnCopy.Text = "Копировать";
-            btnCopy.SetBounds(750, 550, 100, 25);
+            btnCopy.SetBounds(772, 550, 100, 25);
             btnCopy.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             btnCopy.Click += delegate
             {
@@ -675,6 +844,148 @@ namespace ScanPublisher
             if (value < progress.Minimum) value = progress.Minimum;
             if (value > progress.Maximum) value = progress.Maximum;
             progress.Value = value;
+        }
+
+        private void ShowSettings()
+        {
+            if (busy) { MessageBox.Show(this, "Дождитесь завершения публикации.", "ScanPublisher", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+            using (SettingsForm f = new SettingsForm())
+            {
+                if (f.ShowDialog(this) == DialogResult.OK)
+                {
+                    string ok = f.SavedRepo;
+                    if (ok != null)
+                        lblStatus.Text = "Подключено: " + ok;
+                }
+            }
+        }
+    }
+
+    internal class SettingsForm : Form
+    {
+        private readonly TextBox txtOwner = new TextBox();
+        private readonly TextBox txtRepo = new TextBox();
+        private readonly TextBox txtBranch = new TextBox();
+        private readonly TextBox txtToken = new TextBox();
+        private readonly Label lblState = new Label();
+        private readonly Button btnVerify = new Button();
+        private readonly Button btnSave = new Button();
+        private readonly Button btnCancel = new Button();
+        private GithubSettings settings;
+
+        public string SavedRepo { get; private set; }
+
+        public SettingsForm()
+        {
+            Text = "Настройки GitHub";
+            ClientSize = new Size(520, 330);
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            Font = new Font("Segoe UI", 9F);
+
+            settings = GithubSettings.Load();
+
+            Label l0 = new Label(); l0.Text = "Подключение к GitHub для публикации облаков. Ссылки выдаются как <owner>.github.io/<repo>."; l0.SetBounds(12, 10, 496, 30); Controls.Add(l0);
+
+            Label l1 = new Label(); l1.Text = "Владелец (account)"; l1.SetBounds(12, 48, 180, 18); Controls.Add(l1);
+            txtOwner.SetBounds(12, 68, 496, 23); txtOwner.Text = settings.Owner ?? ""; Controls.Add(txtOwner);
+
+            Label l2 = new Label(); l2.Text = "Репозиторий"; l2.SetBounds(12, 96, 180, 18); Controls.Add(l2);
+            txtRepo.SetBounds(12, 116, 496, 23); txtRepo.Text = settings.Repo ?? ""; Controls.Add(txtRepo);
+
+            Label l3 = new Label(); l3.Text = "Ветка"; l3.SetBounds(12, 144, 180, 18); Controls.Add(l3);
+            txtBranch.SetBounds(12, 164, 110, 23); txtBranch.Text = settings.Branch ?? ""; Controls.Add(txtBranch);
+
+            Label l4 = new Label(); l4.Text = "Токен (личный PAT)"; l4.SetBounds(130, 144, 200, 18); Controls.Add(l4);
+            txtToken.SetBounds(130, 164, 378, 23); txtToken.UseSystemPasswordChar = true; txtToken.Text = settings.Token ?? ""; Controls.Add(txtToken);
+
+            lblState.Text = "Заполните и нажмите «Проверить».";
+            lblState.SetBounds(12, 198, 496, 30);
+            lblState.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            Controls.Add(lblState);
+
+            btnVerify.Text = "Проверить подключение";
+            btnVerify.SetBounds(12, 248, 200, 28);
+            btnVerify.Click += delegate { Verify(); };
+            Controls.Add(btnVerify);
+
+            btnSave.Text = "Сохранить";
+            btnSave.SetBounds(320, 248, 84, 28);
+            btnSave.DialogResult = DialogResult.OK;
+            btnSave.Click += delegate { SaveAndClose(); };
+            Controls.Add(btnSave);
+
+            btnCancel.Text = "Отмена";
+            btnCancel.SetBounds(410, 248, 84, 28);
+            btnCancel.DialogResult = DialogResult.Cancel;
+            Controls.Add(btnCancel);
+
+            AcceptButton = btnVerify;
+        }
+
+        private GithubSettings Collect()
+        {
+            GithubSettings s = new GithubSettings();
+            s.Owner = txtOwner.Text.Trim();
+            s.Repo = txtRepo.Text.Trim();
+            s.Branch = txtBranch.Text.Trim();
+            if (s.Branch.Length == 0) s.Branch = "main";
+            s.Token = txtToken.Text.Trim();
+            return s;
+        }
+
+        private void Verify()
+        {
+            GithubSettings s = Collect();
+            if (string.IsNullOrEmpty(s.Owner) || string.IsNullOrEmpty(s.Repo))
+            {
+                lblState.Text = "Заполните владельца и репозиторий.";
+                lblState.ForeColor = Color.Firebrick;
+                return;
+            }
+            if (string.IsNullOrEmpty(s.Token))
+            {
+                lblState.Text = "Укажите токен для проверки (без токена проверить нельзя).";
+                lblState.ForeColor = Color.Firebrick;
+                return;
+            }
+            btnVerify.Enabled = false;
+            lblState.Text = "Проверяю...";
+            lblState.ForeColor = Color.DimGray;
+            btnVerify.Text = "Проверяю...";
+            try
+            {
+                string ok = Pipeline.VerifyGithub(s, null);
+                lblState.Text = "✓ Подключение работает: " + ok;
+                lblState.ForeColor = Color.SeaGreen;
+                settings = s;
+            }
+            catch (Exception ex)
+            {
+                lblState.Text = "✗ " + ex.Message;
+                lblState.ForeColor = Color.Firebrick;
+            }
+            finally
+            {
+                btnVerify.Enabled = true;
+                btnVerify.Text = "Проверить подключение";
+            }
+        }
+
+        private void SaveAndClose()
+        {
+            GithubSettings s = Collect();
+            if (string.IsNullOrEmpty(s.Owner) || string.IsNullOrEmpty(s.Repo))
+            {
+                MessageBox.Show(this, "Укажите владельца и репозиторий.", "Настройки", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                DialogResult = DialogResult.None;
+                return;
+            }
+            s.Save();
+            SavedRepo = s.RepoDisplay;
+            DialogResult = DialogResult.OK;
         }
     }
 
