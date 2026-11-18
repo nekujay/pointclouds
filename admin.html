@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⚙️ Админка облаков точек</title>
+<style>
+  :root { --bg:#f8f9fa; --card:#fff; --text:#212529; --accent:#0d6efd; --danger:#dc3545; --success:#22c55e; --border:#dee2e6; --muted:#6c757d; --radius:12px; }
+  @media (prefers-color-scheme:dark) { :root { --bg:#121212; --card:#1e1e1e; --text:#e0e0e0; --accent:#4dabf7; --border:#333; --muted:#999; } }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); padding:2rem 1rem; line-height:1.5; }
+  .wrap { max-width:920px; margin:0 auto; }
+  h1 { font-size:1.75rem; margin-bottom:.25rem; }
+  h2 { font-size:1.15rem; margin-bottom:1rem; }
+  .sub { opacity:.65; margin-bottom:2rem; }
+  .panel { background:var(--card); border-radius:var(--radius); padding:1.25rem; margin-bottom:1rem; box-shadow:0 2px 12px rgba(0,0,0,.05); }
+  details.panel > summary { cursor:pointer; font-weight:600; list-style:none; display:flex; align-items:center; gap:.5rem; }
+  details.panel > summary::before { content:'▸'; transition:transform .2s; }
+  details.panel[open] > summary::before { transform:rotate(90deg); }
+  details.panel > summary::-webkit-details-marker { display:none; }
+  .panel-body { margin-top:1rem; }
+  label { display:block; font-size:.85rem; opacity:.8; margin-bottom:.4rem; font-weight:500; }
+  input[type=text], input[type=password], textarea { width:100%; padding:.55rem .75rem; border:1.5px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); font-size:.9rem; font-family:inherit; margin-bottom:.85rem; }
+  input:focus, textarea:focus { outline:none; border-color:var(--accent); }
+  textarea { resize:vertical; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 1rem; }
+  @media (max-width:600px) { .grid2 { grid-template-columns:1fr; } }
+  .row { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; }
+  .row.between { justify-content:space-between; }
+  .btn { padding:.55rem 1.1rem; border-radius:8px; border:1.5px solid var(--border); font-weight:600; font-size:.85rem; cursor:pointer; font-family:inherit; background:var(--bg); color:var(--text); transition:opacity .15s; }
+  .btn:hover { opacity:.85; }
+  .btn-primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .btn-danger { background:transparent; color:var(--danger); border-color:var(--danger); }
+  .btn-sm { padding:.3rem .6rem; font-size:.8rem; }
+  .status { font-size:.85rem; }
+  .status.ok { color:var(--success); }
+  .status.err { color:var(--danger); }
+  .muted { color:var(--muted); }
+  .err { color:var(--danger); }
+  .dropzone { border:2px dashed var(--border); border-radius:var(--radius); padding:1.5rem 1rem; text-align:center; cursor:pointer; transition:.15s; }
+  .dropzone.drag { border-color:var(--accent); background:rgba(13,110,253,.05); }
+  .model-list { display:flex; flex-direction:column; gap:.5rem; }
+  .model-item { display:flex; align-items:center; justify-content:space-between; padding:.75rem; background:var(--bg); border-radius:8px; gap:.5rem; }
+  .model-title { font-weight:600; font-size:.95rem; }
+  .model-id { font-size:.75rem; color:var(--muted); font-family:ui-monospace,monospace; word-break:break-all; }
+  .actions { display:flex; gap:.3rem; flex-shrink:0; }
+  .hint { font-size:.8rem; color:var(--muted); margin-top:.4rem; }
+  .toast { position:fixed; bottom:1.5rem; left:50%; transform:translateX(-50%) translateY(100px); background:#22c55e; color:#fff; padding:.75rem 1.5rem; border-radius:10px; font-weight:600; box-shadow:0 10px 30px rgba(0,0,0,.2); transition:transform .3s; z-index:1000; max-width:90vw; word-break:break-all; }
+  .toast.show { transform:translateX(-50%) translateY(0); }
+  .toast.err { background:#dc3545; }
+  .num { font-size:.8rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>⚙️ Облака точек — админка</h1>
+  <p class="sub">Добавление по ссылке, проверка доступности, удаление из галереи</p>
+
+  <details class="panel" id="settingsPanel">
+    <summary>🔑 Подключение к GitHub</summary>
+    <div class="panel-body">
+      <div class="grid2">
+        <div><label>Owner</label><input type="text" id="cfgOwner" value="nekujay"></div>
+        <div><label>Repo</label><input type="text" id="cfgRepo" value="pointclouds"></div>
+        <div><label>Branch</label><input type="text" id="cfgBranch" value="main"></div>
+        <div><label>Personal Access Token</label><input type="password" id="cfgToken" placeholder="github_pat_..."></div>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary" id="saveCfgBtn">Проверить и сохранить</button>
+        <span id="cfgStatus" class="status"></span>
+      </div>
+      <p class="hint">Токен хранится только в этом браузере (localStorage). Нужны права Contents: read &amp; write.</p>
+    </div>
+  </details>
+
+  <section class="panel">
+    <h2>➕ Добавить облако по ссылке</h2>
+    <label>Ссылка на cloud.js (или на .laz / .las)</label>
+    <input type="text" id="srcUrl" placeholder="https://nekujay.github.io/3d/data/scan-01/cloud.js">
+    <div class="row" style="margin-bottom:.85rem">
+      <button class="btn" id="checkBtn">🔍 Проверить ссылку</button>
+      <span id="checkStatus" class="status"></span>
+    </div>
+
+    <div class="grid2">
+      <div><label>Название</label><input type="text" id="cTitle" placeholder="Офис, 1 этаж"></div>
+      <div><label>ID для ссылки</label><input type="text" id="cId" placeholder="office-1"></div>
+    </div>
+    <label>Описание</label>
+    <textarea id="cDesc" rows="2" placeholder="Faro Focus, 12 станций"></textarea>
+    <div class="grid2">
+      <div><label>Кол-во точек (необязательно)</label><input type="text" id="cPoints" placeholder="12400000"></div>
+      <div><label>Ссылка на превью (необязательно)</label><input type="text" id="cPoster" placeholder="https://.../poster.jpg"></div>
+    </div>
+    <div class="row">
+      <button class="btn btn-primary" id="addBtn">Добавить в галерею</button>
+      <span id="addStatus" class="status"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>📦 Загрузить один файл .laz / .las</h2>
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="fileInput" accept=".laz,.las" hidden>
+      <p>Перетащите <b>.laz</b> или выберите файл</p>
+      <p class="muted" style="font-size:.85rem;margin-top:.25rem">Для больших сканов используйте PotreeConverter + git (см. подсказку ниже)</p>
+    </div>
+    <div id="fileInfo" class="hint"></div>
+    <p class="hint">Файл больше ~25 МБ через GitHub API лучше не грузить: основной путь — конвертация <b>convert.ps1</b> и отправка папки через git.</p>
+  </section>
+
+  <section class="panel">
+    <div class="row between">
+      <h2>📋 Облака в галерее</h2>
+      <button class="btn" id="reloadBtn">↻ Обновить</button>
+    </div>
+    <div id="modelList" class="model-list"><p class="muted">Сначала подключитесь к GitHub.</p></div>
+  </section>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const LS_KEY = 'gh_pc_admin_cfg';
+let cfg = { owner:'nekujay', repo:'pointclouds', branch:'main', token:'' };
+let currentClouds = [];
+let currentSha = null;
+let pendingFile = null;
+
+/* ---------- утилиты ---------- */
+function b64encodeUtf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = ''; bytes.forEach(b => bin += String.fromCharCode(b));
+  return btoa(bin);
+}
+function b64decodeUtf8(b64) {
+  const bin = atob(b64.replace(/\s/g, ''));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+function slug(s) {
+  const map = {'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z','и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f','х':'h','ц':'c','ч':'ch','ш':'sh','щ':'sch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya'};
+  return s.toLowerCase().replace(/[а-яё]/g, c => map[c] || '').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,50) || 'cloud-' + Date.now();
+}
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function toast(msg, isErr) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 4000);
+}
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(',')[1]);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+function pagesUrl(path) {
+  const enc = path.split('/').map(encodeURIComponent).join('/');
+  return `https://${cfg.owner}.github.io/${cfg.repo}/${enc}`;
+}
+function viewerLink(src, title) {
+  const base = `https://${cfg.owner}.github.io/${cfg.repo}/website/index.html`;
+  return `${base}#cloud=${encodeURIComponent(src)}&name=${encodeURIComponent(title || '')}`;
+}
+
+/* ---------- GitHub API ---------- */
+async function ghApi(path, options = {}) {
+  return fetch(`https://api.github.com/repos/${cfg.owner}/${cfg.repo}${path}`, {
+    ...options,
+    headers: {
+      'Authorization': `Bearer ${cfg.token}`,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(options.headers || {})
+    }
+  });
+}
+
+async function loadClouds() {
+  const res = await ghApi(`/contents/clouds.json?ref=${cfg.branch}`);
+  if (res.status === 404) { currentClouds = []; currentSha = null; return; }
+  if (!res.ok) throw new Error('Не удалось загрузить clouds.json: HTTP ' + res.status);
+  const data = await res.json();
+  try { currentClouds = JSON.parse(b64decodeUtf8(data.content)); }
+  catch (e) { throw new Error('clouds.json содержит некорректный JSON'); }
+  if (!Array.isArray(currentClouds)) currentClouds = [];
+  currentSha = data.sha;
+}
+
+async function saveClouds(message) {
+  const buildBody = () => {
+    const body = {
+      message,
+      content: b64encodeUtf8(JSON.stringify(currentClouds, null, 2) + '\n'),
+      branch: cfg.branch
+    };
+    if (currentSha) body.sha = currentSha;
+    return body;
+  };
+  const put = (body) => ghApi('/contents/clouds.json', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  let res = await put(buildBody());
+  if (res.status === 409 || res.status === 422) {
+    await loadClouds();
+    res = await put(buildBody());
+  }
+  if (!res.ok) {
+    let msg = 'HTTP ' + res.status;
+    try { msg = (await res.json()).message || msg; } catch (e) {}
+    throw new Error('Ошибка сохранения clouds.json: ' + msg);
+  }
+  const result = await res.json();
+  currentSha = result.content.sha;
+}
+
+async function uploadBinary(path, file) {
+  const content = await fileToBase64(file);
+  let sha;
+  const check = await ghApi(`/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${cfg.branch}`);
+  if (check.ok) { const d = await check.json(); sha = d.sha; }
+  const body = { message: `upload ${path}`, content, branch: cfg.branch };
+  if (sha) body.sha = sha;
+  const res = await ghApi(`/contents/${path.split('/').map(encodeURIComponent).join('/')}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    let msg = 'HTTP ' + res.status;
+    try { msg = (await res.json()).message || msg; } catch (e) {}
+    throw new Error(`${file.name}: ${msg}`);
+  }
+}
+
+/* ---------- настройки ---------- */
+function loadCfg() {
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem(LS_KEY) || '{}')); } catch (e) {}
+  document.getElementById('cfgOwner').value = cfg.owner;
+  document.getElementById('cfgRepo').value = cfg.repo;
+  document.getElementById('cfgBranch').value = cfg.branch;
+  document.getElementById('cfgToken').value = cfg.token;
+  if (cfg.token) verifyToken();
+}
+async function saveCfg() {
+  cfg.owner = document.getElementById('cfgOwner').value.trim();
+  cfg.repo = document.getElementById('cfgRepo').value.trim();
+  cfg.branch = document.getElementById('cfgBranch').value.trim() || 'main';
+  cfg.token = document.getElementById('cfgToken').value.trim();
+  localStorage.setItem(LS_KEY, JSON.stringify(cfg));
+  await verifyToken();
+}
+async function verifyToken() {
+  const el = document.getElementById('cfgStatus');
+  el.textContent = 'Проверка...'; el.className = 'status';
+  try {
+    const res = await ghApi('');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const repo = await res.json();
+    if (!repo.permissions || !repo.permissions.push) throw new Error('У токена нет прав на запись');
+    el.textContent = `✓ ${repo.full_name}`;
+    el.className = 'status ok';
+    document.getElementById('settingsPanel').open = false;
+    await refreshList();
+  } catch (e) {
+    el.textContent = '✗ ' + e.message;
+    el.className = 'status err';
+  }
+}
+
+/* ---------- проверка ссылки ---------- */
+async function checkUrl(url) {
+  const st = document.getElementById('checkStatus');
+  st.textContent = 'Проверяю…'; st.className = 'status';
+  try {
+    if (!url) throw new Error('Вставьте ссылку');
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (/cloud\.js$|metadata\.json$/i.test(url)) {
+      const json = await res.json();
+      const pts = json.points || json.numPoints || json.pointCount;
+      st.textContent = '✓ Файл доступен' + (pts ? ` · ${Number(pts).toLocaleString('ru-RU')} точек` : '');
+      if (pts && !document.getElementById('cPoints').value) document.getElementById('cPoints').value = pts;
+    } else {
+      const len = res.headers.get('content-length');
+      st.textContent = '✓ Файл доступен' + (len ? ` · ${(len / 1048576).toFixed(1)} МБ` : '');
+    }
+    st.className = 'status ok';
+  } catch (e) {
+    st.textContent = '✗ ' + e.message + ' (проверьте путь и регистр букв)';
+    st.className = 'status err';
+  }
+}
+
+/* ---------- добавление ---------- */
+async function addCloud() {
+  const st = document.getElementById('addStatus');
+  st.textContent = ''; st.className = 'status';
+  const title = document.getElementById('cTitle').value.trim();
+  const srcRaw = document.getElementById('srcUrl').value.trim();
+  const idBase = document.getElementById('cId').value.trim() || slug(title || srcRaw);
+  const desc = document.getElementById('cDesc').value.trim();
+  const pointsRaw = document.getElementById('cPoints').value.replace(/\s/g, '');
+  const poster = document.getElementById('cPoster').value.trim();
+
+  if (!title) { st.textContent = 'Укажите название'; st.className = 'status err'; return; }
+
+  try {
+    let src = srcRaw;
+
+    // файл из dropzone имеет приоритет
+    if (pendingFile) {
+      st.textContent = 'Загрузка файла...';
+      if (pendingFile.size > 25 * 1024 * 1024) {
+        throw new Error(`Файл ${(pendingFile.size / 1048576).toFixed(1)} МБ — слишком большой для API. Сконвертируйте его через convert.ps1 и загрузите папку через git.`);
+      }
+      const fileName = pendingFile.name.split(/[\/\\]/).pop();
+      const path = `data/${slug(idBase)}/${fileName}`;
+      await uploadBinary(path, pendingFile);
+      src = pagesUrl(path);
+    }
+
+    if (!src) throw new Error('Добавьте файл или укажите ссылку на cloud.js / .laz');
+
+    st.textContent = 'Сохранение clouds.json...';
+    await loadClouds();
+
+    let finalId = idBase, n = 1;
+    while (currentClouds.some(c => c.id === finalId)) finalId = `${idBase}-${n++}`;
+
+    const entry = { id: finalId, title, description: desc, src };
+    if (pointsRaw && !isNaN(Number(pointsRaw))) entry.points = Number(pointsRaw);
+    if (poster) entry.poster = poster;
+    entry.date = new Date().toISOString().slice(0, 10);
+
+    currentClouds.push(entry);
+    await saveClouds(`add pointcloud: ${title}`);
+
+    resetForm();
+    st.textContent = '✓ Добавлено. Появится в галерее через ~1 мин.';
+    st.className = 'status ok';
+    toast('Облако добавлено');
+    await refreshList();
+  } catch (e) {
+    console.error(e);
+    st.textContent = '✗ ' + e.message;
+    st.className = 'status err';
+    toast(e.message, true);
+  }
+}
+function resetForm() {
+  pendingFile = null;
+  document.getElementById('fileInfo').textContent = '';
+  ['srcUrl','cTitle','cId','cDesc','cPoints','cPoster'].forEach(id => {
+    const el = document.getElementById(id);
+    el.value = '';
+    delete el.dataset.touched;
+  });
+}
+
+/* ---------- список ---------- */
+async function refreshList() {
+  const box = document.getElementById('modelList');
+  if (!cfg.token) { box.innerHTML = '<p class="muted">Сначала подключитесь к GitHub.</p>'; return; }
+  box.innerHTML = '<p class="muted">Загрузка…</p>';
+  try {
+    await loadClouds();
+    if (!currentClouds.length) { box.innerHTML = '<p class="muted">Облаков пока нет.</p>'; return; }
+    box.innerHTML = currentClouds.map((c, i) => `
+      <div class="model-item">
+        <div>
+          <div class="model-title">${escapeHtml(c.title)}</div>
+          <div class="model-id">${escapeHtml(c.src)}</div>
+          ${c.points ? `<div class="num">${Number(c.points).toLocaleString('ru-RU')} точек</div>` : ''}
+        </div>
+        <div class="actions">
+          <button class="btn btn-sm" onclick="openCloud(${i})" title="Открыть">👁</button>
+          <button class="btn btn-sm" onclick="copyLink(${i})" title="Скопировать ссылку">🔗</button>
+          <button class="btn btn-sm" onclick="copyIframe(${i})" title="Код для вставки">&lt;/&gt;</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteCloud(${i})" title="Удалить из галереи">🗑</button>
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    box.innerHTML = `<p class="err">${escapeHtml(e.message)}</p>`;
+  }
+}
+
+window.openCloud = (i) => {
+  const c = currentClouds[i];
+  window.open(viewerLink(c.src, c.title), '_blank');
+};
+window.copyLink = (i) => {
+  const c = currentClouds[i];
+  navigator.clipboard.writeText(viewerLink(c.src, c.title))
+    .then(() => toast('Ссылка скопирована'))
+    .catch(() => toast('Не удалось скопировать', true));
+};
+window.copyIframe = (i) => {
+  const c = currentClouds[i];
+  const url = viewerLink(c.src, c.title) + '&embed=1';
+  const code = `<iframe src="${url}" width="100%" height="600" style="border:0;border-radius:12px" allowfullscreen></iframe>`;
+  navigator.clipboard.writeText(code)
+    .then(() => toast('Код iframe скопирован'))
+    .catch(() => toast('Не удалось скопировать', true));
+};
+window.deleteCloud = async (i) => {
+  const c = currentClouds[i];
+  if (!confirm(`Удалить «${c.title}» из галереи? (Файлы данных останутся на GitHub)`)) return;
+  const backup = currentClouds.slice();
+  currentClouds.splice(i, 1);
+  try {
+    await saveClouds(`remove pointcloud: ${c.title}`);
+    toast('Удалено из галереи');
+    await refreshList();
+  } catch (e) {
+    currentClouds = backup;
+    toast(e.message, true);
+  }
+};
+
+/* ---------- файлы ---------- */
+function handleFile(file) {
+  if (!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext !== 'laz' && ext !== 'las') { toast('Нужен файл .laz или .las', true); return; }
+  pendingFile = file;
+  document.getElementById('fileInfo').innerHTML =
+    `Выбран: <b>${escapeHtml(file.name)}</b> · ${(file.size / 1048576).toFixed(2)} МБ` +
+    (file.size > 25 * 1024 * 1024 ? ' · <span class="err">больше лимита API, используйте convert.ps1</span>' : '');
+  if (!document.getElementById('cTitle').value) {
+    document.getElementById('cTitle').value = file.name.replace(/\.(laz|las)$/i, '');
+  }
+}
+
+/* ---------- init ---------- */
+document.getElementById('saveCfgBtn').onclick = saveCfg;
+document.getElementById('addBtn').onclick = addCloud;
+document.getElementById('reloadBtn').onclick = refreshList;
+document.getElementById('checkBtn').onclick = () => checkUrl(document.getElementById('srcUrl').value.trim());
+document.getElementById('fileInput').onchange = e => { handleFile(e.target.files[0]); e.target.value = ''; };
+const dz = document.getElementById('dropzone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag'); handleFile(e.dataTransfer.files[0]); });
+document.getElementById('cTitle').addEventListener('input', e => {
+  const id = document.getElementById('cId');
+  if (!id.dataset.touched) id.value = slug(e.target.value);
+});
+document.getElementById('cId').addEventListener('input', e => { e.target.dataset.touched = '1'; });
+
+loadCfg();
+</script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Облако точек</title>
+
+<link rel="stylesheet" type="text/css" href="../potree/potree.css">
+<link rel="stylesheet" type="text/css" href="../libs/jquery-ui/jquery-ui.min.css">
+<link rel="stylesheet" type="text/css" href="../libs/openlayers3/ol.css">
+<link rel="stylesheet" type="text/css" href="../libs/spectrum/spectrum.css">
+<link rel="stylesheet" type="text/css" href="../libs/jstree/themes/mixed/style.css">
+
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0e1116; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; }
+  #potree_render_area { position:absolute; inset:0; background:radial-gradient(circle at 50% 35%, #22303f 0%, #0e1116 70%); }
+  #potree_sidebar_container { position:absolute; top:0; bottom:0; left:0; z-index:120; }
+
+  .topbar { position:absolute; top:0; left:0; right:0; z-index:130; display:flex; align-items:center; gap:.75rem; padding:.6rem .9rem; color:#fff;
+    background:linear-gradient(to bottom, rgba(8,11,16,.85), rgba(8,11,16,0)); pointer-events:none; }
+  .topbar > * { pointer-events:auto; }
+  .topbar a { color:#9ecbff; text-decoration:none; font-size:.85rem; border:1px solid rgba(255,255,255,.22); padding:.3rem .6rem; border-radius:8px; background:rgba(255,255,255,.06); }
+  .topbar a:hover { background:rgba(255,255,255,.15); }
+  .cloud-name { font-size:.95rem; font-weight:600; letter-spacing:.01em; text-shadow:0 1px 3px rgba(0,0,0,.8); }
+  .cloud-meta { font-size:.75rem; opacity:.7; }
+  body.embed .topbar { display:none; }
+
+  .overlay { position:absolute; inset:0; z-index:140; display:flex; align-items:center; justify-content:center; padding:1.5rem;
+    background:rgba(8,11,16,.82); color:#e6edf3; text-align:center; backdrop-filter:blur(3px); }
+  .overlay.hidden { display:none; }
+  .overlay .panel { max-width:640px; background:#151b24; border:1px solid rgba(255,255,255,.1); border-radius:16px; padding:1.75rem 1.5rem; }
+  .overlay h1 { font-size:1.25rem; margin:0 0 .6rem; }
+  .overlay p { margin:.4rem 0; font-size:.92rem; line-height:1.5; color:#b8c4d0; }
+  .overlay code { display:block; margin:.75rem 0; padding:.6rem .75rem; background:#0b0f14; border-radius:8px; font-size:.78rem; word-break:break-all; color:#9ecbff; text-align:left; }
+  .overlay .spinner { width:34px; height:34px; margin:0 auto 1rem; border:3px solid rgba(255,255,255,.15); border-top-color:#4dabf7; border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .overlay .err { color:#ff9b9b; }
+
+  @media (max-width:600px) {
+    #potree_sidebar_container { display:none; }
+    .cloud-name { font-size:.85rem; }
+  }
+</style>
+</head>
+<body>
+
+<script src="../libs/jquery/jquery-3.1.1.min.js"></script>
+<script src="../libs/spectrum/spectrum.js"></script>
+<script src="../libs/jquery-ui/jquery-ui.min.js"></script>
+<script src="../libs/other/BinaryHeap.js"></script>
+<script src="../libs/tween/tween.min.js"></script>
+<script src="../libs/d3/d3.js"></script>
+<script src="../libs/proj4/proj4.js"></script>
+<script src="../libs/openlayers3/ol.js"></script>
+<script src="../libs/i18next/i18next.js"></script>
+<script src="../libs/jstree/jstree.js"></script>
+<script src="../potree/potree.js"></script>
+<script src="../libs/plasio/js/laslaz.js"></script>
+
+<div class="potree_container" style="position:absolute; width:100%; height:100%; left:0; top:0;">
+  <div id="potree_render_area"></div>
+  <div id="potree_sidebar_container"></div>
+</div>
+
+<div class="topbar">
+  <a id="backLink" href="../index.html">← Галерея</a>
+  <div>
+    <div class="cloud-name" id="cloudName">Облако точек</div>
+    <div class="cloud-meta" id="cloudMeta"></div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="panel" id="overlayPanel">
+    <div class="spinner"></div>
+    <h1>Загрузка облака точек…</h1>
+    <p id="overlayText">Подключаюсь к данным.</p>
+  </div>
+</div>
+
+<script type="module">
+const overlay    = document.getElementById('overlay');
+const panel      = document.getElementById('overlayPanel');
+const overlayTxt = document.getElementById('overlayText');
+const nameEl     = document.getElementById('cloudName');
+const metaEl     = document.getElementById('cloudMeta');
+
+function showError(title, html) {
+  overlay.classList.remove('hidden');
+  panel.innerHTML = `
+    <h1 class="err">${title}</h1>
+    ${html}
+    <p style="margin-top:1rem"><a href="../index.html" style="color:#9ecbff">← Вернуться в галерею</a></p>`;
+}
+function hideOverlay() { overlay.classList.add('hidden'); }
+
+// ---------- разбор ссылки ----------
+const hashParams  = new URLSearchParams(location.hash.replace(/^#/, ''));
+const queryParams = new URLSearchParams(location.search);
+const rawCloud    = hashParams.get('cloud') || queryParams.get('cloud');
+const cloudName   = hashParams.get('name') || queryParams.get('name') || '';
+const embedMode   = (hashParams.get('embed') || queryParams.get('embed')) === '1';
+const edlParam    = hashParams.get('edl');
+const budgetParam = parseInt(hashParams.get('budget') || '', 10);
+
+if (embedMode) document.body.classList.add('embed');
+if (cloudName) { nameEl.textContent = cloudName; document.title = cloudName + ' — облако точек'; }
+
+if (!rawCloud) {
+  showError('Ссылка не указана', `
+    <p>Этот просмотрщик открывает облако точек по ссылке вида:</p>
+    <code>website/index.html#cloud=…/data/scan/cloud.js</code>
+    <p>Откройте модель из галереи — ссылка сформируется автоматически.</p>`);
+  throw new Error('no cloud');
+}
+
+// ---------- разрешение адреса ----------
+const candidates = [];
+try {
+  candidates.push(new URL(rawCloud, location.href).href);
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(rawCloud)) {
+    candidates.push(new URL(rawCloud, new URL('../', location.href)).href);
+  }
+} catch (e) {
+  showError('Некорректная ссылка', `<p>Не удалось разобрать адрес:</p><code>${rawCloud}</code>`);
+  throw e;
+}
+
+// ---------- выбор рабочего адреса ----------
+async function checkReachable(url) {
+  try {
+    const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    return { ok: res.ok, status: res.status };
+  } catch (err) {
+    return { ok: false, status: 0, error: err.message };
+  }
+}
+
+let cloudUrl = null;
+let lastStatus = 0;
+let lastTried = candidates[0];
+for (const c of candidates) {
+  const probe = await checkReachable(c);
+  lastTried = c;
+  if (probe.ok || probe.status === 405 || probe.status === 403) { cloudUrl = c; break; }
+  lastStatus = probe.status;
+}
+
+if (!cloudUrl) {
+  showError('Файл облака не найден', `
+    <p>Сервер ответил <b>${lastStatus || 'ошибка сети'}</b> на запрос:</p>
+    <code>${lastTried}</code>
+    <p>Проверьте, что папка с облаком (файл <b>cloud.js</b> и каталог <b>data/</b> рядом с ним) загружена по этому пути и что имя чувствительно к регистру.</p>`);
+  throw new Error('cloud not reachable');
+}
+
+metaEl.textContent = decodeURIComponent(cloudUrl.replace(location.origin, '').split('/').slice(-2).join('/'));
+
+// ---------- просмотрщик ----------
+let viewer;
+try {
+  viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
+  viewer.setEDLEnabled(edlParam !== '0');
+  viewer.setFOV(60);
+  viewer.setPointBudget(Number.isFinite(budgetParam) ? budgetParam : 2_000_000);
+  try { viewer.setBackground('gradient'); } catch (e) { try { viewer.setBackground('skybox'); } catch (e2) {} }
+
+  viewer.loadGUI(() => {
+    try {
+      viewer.setLanguage('en');
+      $('#menu_tools').next().show();
+      $('#menu_clipping').next().show();
+    } catch (e) {}
+  });
+} catch (e) {
+  showError('Просмотрщик не запустился', `<p class="err">${e.message}</p><p>Проверьте, что папки <b>potree</b> и <b>libs</b> лежат рядом с папкой <b>website</b>.</p>`);
+  throw e;
+}
+
+window.viewer = viewer;
+
+Potree.loadPointCloud(cloudUrl, cloudName || 'pointcloud', (e) => {
+  const pointcloud = e.pointcloud;
+  const material = pointcloud.material;
+  material.size = 1;
+  material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+  material.shape = Potree.PointShape.CIRCLE;
+
+  viewer.scene.addPointCloud(pointcloud);
+  viewer.fitToScreen();
+
+  const pts = pointcloud.numPoints || pointcloud.pcoGeometry?.numPoints || 0;
+  if (pts) metaEl.textContent = pts.toLocaleString('ru-RU') + ' точек';
+  hideOverlay();
+});
+
+// страховка: если через 20 секунд ничего не произошло — подсказка
+setTimeout(() => {
+  if (!overlay.classList.contains('hidden') && panel.querySelector('.spinner')) {
+    overlayTxt.innerHTML = 'Загрузка идёт дольше обычного. Проверьте скорость соединения — облака точек тяжёлые.';
+  }
+}, 20000);
+
+window.addEventListener('error', (e) => {
+  if (!overlay.classList.contains('hidden') && e.message) {
+    showError('Ошибка при загрузке', `<p class="err">${e.message}</p>`);
+  }
+});
+</script>
+</body>
+</html>

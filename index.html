@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Облака точек</title>
+<style>
+  :root { --bg:#f8f9fa; --card:#fff; --text:#212529; --accent:#0d6efd; --muted:#6c757d; --radius:16px; }
+  @media (prefers-color-scheme:dark) { :root { --bg:#121212; --card:#1e1e1e; --text:#e0e0e0; --accent:#4dabf7; --muted:#999; } }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); padding:2rem 1rem; line-height:1.5; min-height:100vh; }
+  header { max-width:1200px; margin:0 auto 2rem; text-align:center; position:relative; }
+  h1 { font-size:2.5rem; font-weight:700; letter-spacing:-.02em; margin-bottom:.35rem; }
+  .subtitle { opacity:.7; font-size:1.05rem; }
+  .btn-refresh { position:absolute; right:0; top:0; background:transparent; border:1.5px solid var(--muted); color:var(--muted); padding:.4rem .8rem; border-radius:8px; font-size:.85rem; cursor:pointer; font-family:inherit; }
+  .btn-refresh:hover { opacity:.7; }
+  .btn-refresh.spin { animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:1.5rem; max-width:1200px; margin:0 auto; }
+  .card { background:var(--card); border-radius:var(--radius); overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,.06); transition:transform .2s, box-shadow .2s; display:flex; flex-direction:column; }
+  .card:hover { transform:translateY(-4px); box-shadow:0 8px 30px rgba(0,0,0,.12); }
+  .card-poster { width:100%; aspect-ratio:16/10; object-fit:cover; display:block; }
+  .card-poster.ph { background:radial-gradient(circle at 50% 40%, #2b3a4d, #101720); color:#7aa7d0; display:flex; align-items:center; justify-content:center; font-size:3rem; font-weight:700; position:relative; }
+  .card-poster.ph::after { content:''; position:absolute; inset:0; background-image:radial-gradient(rgba(255,255,255,.14) 1px, transparent 1px); background-size:9px 9px; opacity:.5; }
+  .card-body { padding:1.25rem; flex:1; display:flex; flex-direction:column; }
+  .card-title { font-size:1.15rem; font-weight:600; margin-bottom:.25rem; }
+  .card-desc { font-size:.9rem; opacity:.65; margin-bottom:.75rem; flex:1; }
+  .card-meta { font-size:.75rem; opacity:.55; margin-bottom:.9rem; display:flex; gap:.75rem; flex-wrap:wrap; }
+  .card-src { margin:-.35rem 0 .9rem; }
+  .card-src a { font-size:.78rem; color:var(--accent); text-decoration:none; }
+  .card-src a:hover { text-decoration:underline; }
+  .card-actions { display:flex; gap:.5rem; }
+  .btn { padding:.55rem 1rem; border-radius:10px; border:none; font-weight:600; font-size:.85rem; cursor:pointer; font-family:inherit; text-decoration:none; text-align:center; flex:1; display:inline-block; transition:opacity .15s, background .2s, color .2s; }
+  .btn-primary { background:var(--accent); color:#fff; }
+  .btn-primary:hover { opacity:.9; }
+  .btn-outline { background:transparent; border:1.5px solid var(--accent); color:var(--accent); }
+  .btn-outline:hover { background:var(--accent); color:#fff; }
+  .btn-ghost { background:transparent; border:1.5px solid var(--muted); color:var(--muted); flex:0 0 auto; }
+  .btn-ghost:hover { opacity:.7; }
+  .empty { text-align:center; opacity:.5; padding:4rem 1rem; grid-column:1/-1; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(100px); background:#22c55e; color:#fff; padding:10px 20px; border-radius:8px; font-weight:600; transition:transform .3s; z-index:1000; }
+  .toast.show { transform:translateX(-50%) translateY(0); }
+  .toast.err { background:#dc3545; }
+  @media (max-width:600px) { h1 { font-size:1.75rem; } .btn-refresh { position:static; margin-top:.75rem; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Облака точек</h1>
+  <p class="subtitle">Лазерное сканирование в браузере</p>
+  <button class="btn-refresh" id="refreshBtn" title="Перезагрузить список">↻</button>
+</header>
+
+<main id="gallery" class="gallery"></main>
+<div id="toast" class="toast"></div>
+
+<script>
+const CLOUDS_URL = 'clouds.json';
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function toast(msg, isErr) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 2500);
+}
+function absUrl(u) {
+  try { return new URL(u, location.href).href; } catch (e) { return u; }
+}
+function viewerUrl(cloud) {
+  const src = absUrl(cloud.src);
+  let url = new URL('website/index.html', location.href);
+  url.hash = 'cloud=' + encodeURIComponent(src);
+  if (cloud.title) url.hash += '&name=' + encodeURIComponent(cloud.title);
+  return url.href;
+}
+function iframeCode(cloud, width = 900, height = 600) {
+  const src = absUrl(cloud.src);
+  let url = new URL('website/index.html', location.href);
+  url.hash = 'cloud=' + encodeURIComponent(src) + '&name=' + encodeURIComponent(cloud.title || '') + '&embed=1';
+  return `<iframe src="${url.href}" width="100%" height="${height}" style="border:0;border-radius:12px;max-width:${width}px" allowfullscreen></iframe>`;
+}
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Скопировано');
+  } catch (e) {
+    // fallback для http и старых браузеров
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('Скопировано'); }
+    catch (err) { toast('Не удалось скопировать', true); prompt('Скопируйте вручную:', text); }
+    document.body.removeChild(ta);
+  }
+}
+
+async function initGallery() {
+  const gallery = document.getElementById('gallery');
+  const btn = document.getElementById('refreshBtn');
+  btn.classList.add('spin');
+  try {
+    const res = await fetch(CLOUDS_URL + '?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const clouds = await res.json();
+    render(clouds);
+  } catch (err) {
+    console.error(err);
+    gallery.innerHTML = `<p class="empty">Не удалось загрузить галерею.<br><small>Проверьте clouds.json (${escapeHtml(err.message)}).</small></p>`;
+  } finally {
+    btn.classList.remove('spin');
+  }
+}
+
+function render(clouds) {
+  const gallery = document.getElementById('gallery');
+  if (!Array.isArray(clouds) || !clouds.length) {
+    gallery.innerHTML = '<p class="empty">Пока нет добавленных облаков точек</p>';
+    return;
+  }
+  gallery.innerHTML = clouds.map((c, i) => {
+    const poster = c.poster
+      ? `<img class="card-poster" src="${escapeHtml(absUrl(c.poster))}" alt="${escapeHtml(c.title)}" loading="lazy">`
+      : `<div class="card-poster ph">${escapeHtml((c.title || '·').charAt(0))}</div>`;
+    const pts = c.points ? Number(c.points).toLocaleString('ru-RU') + ' точек' : '';
+    return `
+      <article class="card">
+        ${poster}
+        <div class="card-body">
+          <h2 class="card-title">${escapeHtml(c.title || c.id)}</h2>
+          <p class="card-desc">${escapeHtml(c.description || 'Без описания')}</p>
+          <div class="card-meta">
+            ${pts ? `<span>${pts}</span>` : ''}
+            ${c.date ? `<span>${escapeHtml(c.date)}</span>` : ''}
+          </div>
+          ${c.rcp ? `<p class="card-src"><a href="${escapeHtml(absUrl(c.rcp))}" target="_blank" rel="noopener">📦 Исходник (.rcp)</a></p>` : ''}
+          <div class="card-actions">
+            <a href="${escapeHtml(viewerUrl(c))}" class="btn btn-primary">Смотреть</a>
+            <button class="btn btn-outline" data-act="link" data-i="${i}">🔗 Ссылка</button>
+            <button class="btn btn-ghost" data-act="iframe" data-i="${i}" title="Код для вставки на сайт">&lt;/&gt;</button>
+          </div>
+        </div>
+      </article>`;
+  }).join('');
+
+  gallery.querySelectorAll('button[data-act]').forEach(b => {
+    b.addEventListener('click', () => {
+      const c = clouds[Number(b.dataset.i)];
+      if (b.dataset.act === 'link') copyText(viewerUrl(c));
+      else copyText(iframeCode(c));
+    });
+  });
+}
+
+document.getElementById('refreshBtn').addEventListener('click', initGallery);
+initGallery();
+</script>
+</body>
+</html>
