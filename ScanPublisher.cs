@@ -97,6 +97,78 @@ namespace ScanPublisher
         }
     }
 
+    internal class CloudEntry
+    {
+        public string Id = "";
+        public string Title = "";
+        public string Description = "";
+        public string Src = "";
+        public string Points = "";
+        public string Date = "";
+        public string Poster = "";
+        public string Rcp = "";
+
+        public static string FilePath
+        {
+            get { return Path.Combine(Pipeline.Root, "clouds.json"); }
+        }
+
+        public static List<CloudEntry> LoadAll()
+        {
+            List<CloudEntry> list = new List<CloudEntry>();
+            try
+            {
+                if (!File.Exists(FilePath)) return list;
+                string text = File.ReadAllText(FilePath, Encoding.UTF8);
+                int start = text.IndexOf('[');
+                int end = text.LastIndexOf(']');
+                if (start < 0 || end <= start) return list;
+                string body = text.Substring(start + 1, end - start - 1);
+                foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(body, "\\{[^{}]*\\}"))
+                {
+                    string o = m.Value;
+                    CloudEntry e = new CloudEntry();
+                    e.Id = Pipeline.JsonField(o, "id") ?? "";
+                    e.Title = Pipeline.JsonField(o, "title") ?? "";
+                    e.Description = Pipeline.JsonField(o, "description") ?? "";
+                    e.Src = Pipeline.JsonField(o, "src") ?? "";
+                    e.Points = Pipeline.IntField(o, "points") ?? "";
+                    e.Date = Pipeline.JsonField(o, "date") ?? "";
+                    e.Poster = Pipeline.JsonField(o, "poster") ?? "";
+                    e.Rcp = Pipeline.JsonField(o, "rcp") ?? "";
+                    list.Add(e);
+                }
+            }
+            catch (Exception) { }
+            return list;
+        }
+
+        public static void SaveAll(List<CloudEntry> entries)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("[\r\n");
+            for (int i = 0; i < entries.Count; i++)
+            {
+                if (i > 0) sb.Append(",\r\n");
+                CloudEntry e = entries[i];
+                Pipeline.WriteEntry(sb, e.Id, e.Title, e.Description, e.Src,
+                    string.IsNullOrEmpty(e.Points) ? null : e.Points,
+                    e.Date, e.Poster, e.Rcp);
+            }
+            sb.Append("\r\n]\r\n");
+            File.WriteAllText(FilePath, sb.ToString(), new UTF8Encoding(false));
+        }
+
+        public int PointsValue
+        {
+            get
+            {
+                int v;
+                return int.TryParse(Points, out v) ? v : 0;
+            }
+        }
+    }
+
     internal static class Pipeline
     {
         public static string Root
@@ -236,6 +308,12 @@ namespace ScanPublisher
             string cloudJs = Path.Combine(outDir, "cloud.js");
             if (!File.Exists(cloudJs)) throw new Exception("Конвертация не дала результата: " + cloudJs);
 
+            // превью для галереи (пока исходный LAS ещё на месте)
+            string poster = null;
+            say("Готовлю превью...");
+            if (MakePoster(source, id, say)) poster = "data/" + id + "/poster.png";
+            else say("Превью пропущено — карточка будет с заглушкой.");
+
             if (source != o.FilePath && File.Exists(source)) { try { File.Delete(source); } catch (Exception) { } }
 
             long sizeBytes = 0;
@@ -250,31 +328,14 @@ namespace ScanPublisher
 
             // 3. clouds.json
             string src = "data/" + id + "/cloud.js";
-            WriteCloudsJson(id, title, o.Description, points, src);
+            WriteCloudsJson(id, title, o.Description, points, src, poster);
             say("clouds.json обновлён.");
 
             // 4. git
             if (o.Push)
             {
                 // применяем выбранное подключение, если настроены owner/repo
-                GithubSettings gs = GithubSettings.Load();
-                if (gs.IsSet)
-                {
-                    try
-                    {
-                        string current = RunCapture("git", "remote get-url origin", Root, null, null);
-                        bool has = current.Trim().Length > 0;
-                        string expected = string.IsNullOrEmpty(gs.Token)
-                            ? "https://github.com/" + gs.Owner + "/" + gs.Repo + ".git"
-                            : "https://" + gs.Owner + ":" + gs.Token + "@github.com/" + gs.Owner + "/" + gs.Repo + ".git";
-                        if (!has || !current.Trim().Equals(expected, StringComparison.Ordinal))
-                        {
-                            say("Настраиваю remote origin под выбранный аккаунт...");
-                            ConfigureRemote(gs, say);
-                        }
-                    }
-                    catch (Exception ex) { say("remote origin: " + ex.Message); }
-                }
+                EnsureConfiguredRemote(say);
 
                 say("Коммит и отправка на GitHub...");
                 Run("git", "add -- .gitignore clouds.json " + Quote("data/" + id), Root, say, null);
@@ -340,13 +401,13 @@ namespace ScanPublisher
             try { return Regex.Unescape(m.Groups[1].Value); } catch (Exception) { return m.Groups[1].Value; }
         }
 
-        private static string IntField(string obj, string name)
+        internal static string IntField(string obj, string name)
         {
             Match m = Regex.Match(obj, "\"" + name + "\"\\s*:\\s*(\\d+)");
             return m.Success ? m.Groups[1].Value : null;
         }
 
-        private static void WriteEntry(StringBuilder sb, string id, string title, string description,
+        internal static void WriteEntry(StringBuilder sb, string id, string title, string description,
             string src, string points, string date, string poster, string rcp)
         {
             List<string> lines = new List<string>();
@@ -361,47 +422,138 @@ namespace ScanPublisher
             sb.Append("  {\r\n").Append(string.Join(",\r\n", lines.ToArray())).Append("\r\n  }");
         }
 
-        private static void WriteCloudsJson(string id, string title, string description, int points, string src)
+        private static void WriteCloudsJson(string id, string title, string description, int points, string src, string poster)
         {
-            string path = Path.Combine(Root, "clouds.json");
-            string text = File.Exists(path) ? File.ReadAllText(path, Encoding.UTF8) : "[]";
+            List<CloudEntry> entries = CloudEntry.LoadAll();
+            List<CloudEntry> rest = new List<CloudEntry>();
+            foreach (CloudEntry e in entries)
+                if (e.Id != id) rest.Add(e);
 
-            List<string> entries = new List<string>();
-            int start = text.IndexOf('[');
-            int end = text.LastIndexOf(']');
-            if (start >= 0 && end > start)
+            CloudEntry entry = new CloudEntry();
+            entry.Id = id;
+            entry.Title = title;
+            entry.Description = description;
+            entry.Src = src;
+            entry.Points = points > 0 ? points.ToString() : "";
+            entry.Date = DateTime.Now.ToString("yyyy-MM-dd");
+            entry.Poster = poster ?? "";
+            rest.Insert(0, entry);
+
+            CloudEntry.SaveAll(rest);
+        }
+
+        public static void UpdateCloud(string id, string title, string description, string poster, string rcp)
+        {
+            List<CloudEntry> entries = CloudEntry.LoadAll();
+            bool found = false;
+            foreach (CloudEntry e in entries)
             {
-                string body = text.Substring(start + 1, end - start - 1);
-                foreach (Match m in Regex.Matches(body, "\\{[^{}]*\\}"))
+                if (e.Id != id) continue;
+                e.Title = title;
+                e.Description = description;
+                if (poster != null) e.Poster = poster;
+                if (rcp != null) e.Rcp = rcp;
+                found = true;
+            }
+            if (!found) throw new Exception("Запись не найдена в clouds.json: " + id);
+            CloudEntry.SaveAll(entries);
+        }
+
+        public static void DeleteCloud(string id, bool deleteFiles)
+        {
+            List<CloudEntry> entries = CloudEntry.LoadAll();
+            List<CloudEntry> rest = new List<CloudEntry>();
+            foreach (CloudEntry e in entries)
+                if (e.Id != id) rest.Add(e);
+            CloudEntry.SaveAll(rest);
+
+            if (deleteFiles)
+            {
+                string dir = Path.Combine(Root, "data", id);
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            }
+        }
+
+        public static string PosterPathFor(string id)
+        {
+            return Path.Combine(Root, "data", id, "poster.png");
+        }
+
+        // Рендер превью из LAS через thumbnail.py. Возвращает true, если PNG создан.
+        public static bool MakePoster(string lasPath, string id, Action<string> log)
+        {
+            string script = Path.Combine(Root, "thumbnail.py");
+            if (!File.Exists(script))
+            {
+                if (log != null) log("Нет thumbnail.py — превью не создано.");
+                return false;
+            }
+            if (!File.Exists(lasPath))
+            {
+                if (log != null) log("Нет файла LAS для превью: " + lasPath);
+                return false;
+            }
+            string dir = Path.Combine(Root, "data", id);
+            try { Directory.CreateDirectory(dir); }
+            catch (Exception) { }
+
+            string target = Path.Combine(dir, "poster.png");
+            try
+            {
+                Run("python", Quote(script) + " " + Quote(lasPath) + " " + Quote(target), Root, log, null);
+            }
+            catch (Exception ex)
+            {
+                if (log != null) log("Превью не создано: " + ex.Message);
+                return false;
+            }
+            return File.Exists(target);
+        }
+
+        // Гарантирует, что origin соответствует выбранным в настройках owner/repo.
+        public static void EnsureConfiguredRemote(Action<string> log)
+        {
+            GithubSettings gs = GithubSettings.Load();
+            if (!gs.IsSet) return;
+            try
+            {
+                string current = RunCapture("git", "remote get-url origin", Root, null, null).Trim();
+                string expected = string.IsNullOrEmpty(gs.Token)
+                    ? "https://github.com/" + gs.Owner + "/" + gs.Repo + ".git"
+                    : "https://" + gs.Owner + ":" + gs.Token + "@github.com/" + gs.Owner + "/" + gs.Repo + ".git";
+                if (!current.Equals(expected, StringComparison.Ordinal))
                 {
-                    string obj = m.Value;
-                    string otherId = JsonField(obj, "id");
-                    if (otherId == id) continue;
-                    entries.Add(obj);
+                    if (log != null) log("Настраиваю remote origin под выбранный аккаунт...");
+                    ConfigureRemote(gs, log);
                 }
             }
-
-            StringBuilder sb = new StringBuilder();
-            sb.Append("[\r\n");
-            WriteEntry(sb, id, title, description, src,
-                points > 0 ? points.ToString() : null,
-                DateTime.Now.ToString("yyyy-MM-dd"), null, null);
-
-            foreach (string e in entries)
+            catch (Exception ex)
             {
-                sb.Append(",\r\n");
-                WriteEntry(sb,
-                    JsonField(e, "id"),
-                    JsonField(e, "title"),
-                    JsonField(e, "description"),
-                    JsonField(e, "src"),
-                    IntField(e, "points"),
-                    JsonField(e, "date"),
-                    JsonField(e, "poster"),
-                    JsonField(e, "rcp"));
+                if (log != null) log("remote origin: " + ex.Message);
             }
-            sb.Append("\r\n]\r\n");
-            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+        }
+
+        public static void GitCommitPush(string message, string[] paths, Action<string> log)
+        {
+            Action<string> say = delegate(string s) { if (log != null) log(s); };
+            EnsureConfiguredRemote(log);
+
+            StringBuilder add = new StringBuilder("add -A --");
+            foreach (string p in paths) add.Append(" ").Append(Quote(p));
+            Run("git", add.ToString(), Root, say, null);
+
+            RunCapture("git", "diff --cached --quiet", Root, null, null);
+            string commit = RunCapture("git", "commit -m " + Quote(message), Root, say, null);
+            if (!commit.Contains("exit=0"))
+            {
+                say("Нет изменений для коммита.");
+                return;
+            }
+            say("Коммит создан.");
+            string push = RunCapture("git", "push", Root, say, null);
+            if (!push.Contains("|exit=0"))
+                throw new Exception("Не удалось отправить изменения на GitHub. Подробности в журнале.");
+            say("Изменения отправлены на GitHub.");
         }
 
         public static string BuildLink(string src, string title)
@@ -559,15 +711,15 @@ namespace ScanPublisher
         public MainForm()
         {
             Text = "ScanPublisher — публикация облаков точек";
-            ClientSize = new Size(860, 620);
-            MinimumSize = new Size(780, 560);
+            ClientSize = new Size(980, 620);
+            MinimumSize = new Size(900, 560);
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9F);
             AllowDrop = true;
 
             GroupBox gbFile = new GroupBox();
             gbFile.Text = "Скан (перетащите .las/.laz в окно)";
-            gbFile.SetBounds(12, 8, 836, 58);
+            gbFile.SetBounds(12, 8, 956, 58);
             gbFile.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             txtFile.SetBounds(12, 24, 700, 23);
@@ -585,17 +737,17 @@ namespace ScanPublisher
 
             GroupBox gbInfo = new GroupBox();
             gbInfo.Text = "Данные облака";
-            gbInfo.SetBounds(12, 72, 500, 148);
+            gbInfo.SetBounds(12, 72, 620, 148);
             gbInfo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             Label l1 = new Label(); l1.Text = "Название"; l1.SetBounds(12, 22, 90, 18); gbInfo.Controls.Add(l1);
-            txtTitle.SetBounds(12, 42, 474, 23);
+            txtTitle.SetBounds(12, 42, 594, 23);
             txtTitle.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             txtTitle.TextChanged += delegate { if (!string.IsNullOrEmpty(txtFile.Text) && txtTitle.Tag == null) TuneIdPreview(); };
             gbInfo.Controls.Add(txtTitle);
 
             Label l2 = new Label(); l2.Text = "Описание"; l2.SetBounds(12, 68, 90, 18); gbInfo.Controls.Add(l2);
-            txtDesc.SetBounds(12, 88, 474, 23);
+            txtDesc.SetBounds(12, 88, 594, 23);
             txtDesc.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             gbInfo.Controls.Add(txtDesc);
 
@@ -610,9 +762,9 @@ namespace ScanPublisher
             cbVoxel.SelectedIndex = 2;
             gbInfo.Controls.Add(cbVoxel);
 
-            Label l4 = new Label(); l4.Text = "Формат"; l4.SetBounds(300, 116, 60, 18); gbInfo.Controls.Add(l4);
+            Label l4 = new Label(); l4.Text = "Формат"; l4.SetBounds(420, 116, 60, 18); gbInfo.Controls.Add(l4);
             cbProfile.DropDownStyle = ComboBoxStyle.DropDownList;
-            cbProfile.SetBounds(360, 113, 126, 23);
+            cbProfile.SetBounds(480, 113, 126, 23);
             cbProfile.Items.Add("web (LAZ, сжато)");
             cbProfile.Items.Add("hq (без сжатия)");
             cbProfile.SelectedIndex = 0;
@@ -621,7 +773,7 @@ namespace ScanPublisher
 
             GroupBox gbAction = new GroupBox();
             gbAction.Text = "Публикация";
-            gbAction.SetBounds(520, 72, 328, 148);
+            gbAction.SetBounds(640, 72, 328, 148);
             gbAction.Anchor = AnchorStyles.Top | AnchorStyles.Right;
 
             chkOpen.Text = "Открыть в браузере";
@@ -653,7 +805,7 @@ namespace ScanPublisher
             txtLog.ReadOnly = true;
             txtLog.BackColor = Color.FromArgb(250, 250, 250);
             txtLog.Font = new Font("Consolas", 8.5F);
-            txtLog.SetBounds(12, 228, 836, 318);
+            txtLog.SetBounds(12, 228, 956, 318);
             txtLog.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
             Controls.Add(txtLog);
 
@@ -661,28 +813,35 @@ namespace ScanPublisher
             l5.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             Controls.Add(l5);
 
-            txtLink.SetBounds(66, 551, 534, 23);
+            txtLink.SetBounds(66, 551, 510, 23);
             txtLink.ReadOnly = true;
             txtLink.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(txtLink);
 
+            Button btnLibrary = new Button();
+            btnLibrary.Text = "Библиотека";
+            btnLibrary.SetBounds(584, 550, 96, 25);
+            btnLibrary.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            btnLibrary.Click += delegate { ShowLibrary(); };
+            Controls.Add(btnLibrary);
+
             Button btnSettings = new Button();
             btnSettings.Text = "Настройки GitHub";
-            btnSettings.SetBounds(608, 550, 96, 25);
+            btnSettings.SetBounds(688, 550, 96, 25);
             btnSettings.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             btnSettings.Click += delegate { ShowSettings(); };
             Controls.Add(btnSettings);
 
             Button btnOpen = new Button();
             btnOpen.Text = "Открыть";
-            btnOpen.SetBounds(708, 550, 60, 25);
+            btnOpen.SetBounds(792, 550, 60, 25);
             btnOpen.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             btnOpen.Click += delegate { if (txtLink.Text.Length > 0) Pipeline.TryOpen(txtLink.Text); };
             Controls.Add(btnOpen);
 
             Button btnCopy = new Button();
             btnCopy.Text = "Копировать";
-            btnCopy.SetBounds(772, 550, 100, 25);
+            btnCopy.SetBounds(860, 550, 100, 25);
             btnCopy.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             btnCopy.Click += delegate
             {
@@ -859,6 +1018,15 @@ namespace ScanPublisher
                 }
             }
         }
+
+        private void ShowLibrary()
+        {
+            if (busy) { MessageBox.Show(this, "Дождитесь завершения публикации.", "ScanPublisher", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+            using (LibraryForm f = new LibraryForm())
+            {
+                f.ShowDialog(this);
+            }
+        }
     }
 
     internal class SettingsForm : Form
@@ -986,6 +1154,431 @@ namespace ScanPublisher
             s.Save();
             SavedRepo = s.RepoDisplay;
             DialogResult = DialogResult.OK;
+        }
+    }
+
+    internal class LibraryForm : Form
+    {
+        private readonly ListView lv = new ListView();
+        private readonly ImageList thumbs = new ImageList();
+        private readonly PictureBox preview = new PictureBox();
+        private readonly TextBox txtTitle = new TextBox();
+        private readonly TextBox txtDesc = new TextBox();
+        private readonly Label lblMeta = new Label();
+        private readonly Label lblState = new Label();
+        private readonly Button btnSave = new Button();
+        private readonly Button btnDelete = new Button();
+        private readonly Button btnPoster = new Button();
+        private readonly Button btnOpen = new Button();
+        private readonly Button btnCopy = new Button();
+        private readonly Button btnRefresh = new Button();
+        private readonly Button btnClose = new Button();
+        private List<CloudEntry> entries = new List<CloudEntry>();
+        private bool busy;
+
+        public LibraryForm()
+        {
+            Text = "Библиотека облаков";
+            ClientSize = new Size(1000, 560);
+            MinimumSize = new Size(920, 520);
+            StartPosition = FormStartPosition.CenterParent;
+            Font = new Font("Segoe UI", 9F);
+
+            lv.SetBounds(12, 12, 460, 500);
+            lv.View = View.Details;
+            lv.FullRowSelect = true;
+            lv.HideSelection = false;
+            lv.MultiSelect = false;
+            lv.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left;
+            lv.Columns.Add("Название", 250);
+            lv.Columns.Add("Точек", 80, HorizontalAlignment.Right);
+            lv.Columns.Add("Дата", 72);
+            thumbs.ImageSize = new Size(56, 35);
+            thumbs.ColorDepth = ColorDepth.Depth24Bit;
+            lv.SmallImageList = thumbs;
+            lv.SelectedIndexChanged += delegate { ShowSelected(); };
+            lv.DoubleClick += delegate { OpenSelected(); };
+            Controls.Add(lv);
+
+            preview.SetBounds(488, 12, 500, 250);
+            preview.SizeMode = PictureBoxSizeMode.Zoom;
+            preview.BackColor = Color.FromArgb(20, 24, 30);
+            preview.BorderStyle = BorderStyle.FixedSingle;
+            preview.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            Controls.Add(preview);
+
+            Label l1 = new Label(); l1.Text = "Название"; l1.SetBounds(488, 272, 90, 18);
+            l1.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            Controls.Add(l1);
+
+            txtTitle.SetBounds(488, 292, 500, 23);
+            txtTitle.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            Controls.Add(txtTitle);
+
+            Label l2 = new Label(); l2.Text = "Описание"; l2.SetBounds(488, 320, 90, 18);
+            l2.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            Controls.Add(l2);
+
+            txtDesc.Multiline = true;
+            txtDesc.ScrollBars = ScrollBars.Vertical;
+            txtDesc.SetBounds(488, 340, 500, 56);
+            txtDesc.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            Controls.Add(txtDesc);
+
+            lblMeta.SetBounds(488, 402, 500, 32);
+            lblMeta.ForeColor = Color.DimGray;
+            lblMeta.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            Controls.Add(lblMeta);
+
+            btnSave.Text = "Сохранить";
+            btnSave.SetBounds(488, 436, 110, 28);
+            btnSave.Click += delegate { SaveEntry(); };
+            Controls.Add(btnSave);
+
+            btnOpen.Text = "Открыть";
+            btnOpen.SetBounds(604, 436, 90, 28);
+            btnOpen.Click += delegate { OpenSelected(); };
+            Controls.Add(btnOpen);
+
+            btnCopy.Text = "Ссылка";
+            btnCopy.SetBounds(700, 436, 90, 28);
+            btnCopy.Click += delegate { CopyLink(); };
+            Controls.Add(btnCopy);
+
+            btnPoster.Text = "Превью из LAS…";
+            btnPoster.SetBounds(796, 436, 192, 28);
+            btnPoster.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnPoster.Click += delegate { MakePosterForSelected(); };
+            Controls.Add(btnPoster);
+
+            btnDelete.Text = "Удалить";
+            btnDelete.SetBounds(488, 470, 110, 28);
+            btnDelete.ForeColor = Color.Firebrick;
+            btnDelete.Click += delegate { DeleteSelected(); };
+            Controls.Add(btnDelete);
+
+            btnRefresh.Text = "Обновить";
+            btnRefresh.SetBounds(604, 470, 90, 28);
+            btnRefresh.Click += delegate { LoadList(null); };
+            Controls.Add(btnRefresh);
+
+            btnClose.Text = "Закрыть";
+            btnClose.SetBounds(888, 470, 100, 28);
+            btnClose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnClose.Click += delegate { Close(); };
+            Controls.Add(btnClose);
+
+            lblState.SetBounds(488, 506, 500, 40);
+            lblState.ForeColor = Color.DimGray;
+            lblState.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            Controls.Add(lblState);
+
+            LoadList(null);
+        }
+
+        private void LoadList(string keepId)
+        {
+            entries = CloudEntry.LoadAll();
+            lv.BeginUpdate();
+            try
+            {
+                lv.Items.Clear();
+                thumbs.Images.Clear();
+                foreach (CloudEntry e in entries)
+                {
+                    ListViewItem item = new ListViewItem(string.IsNullOrEmpty(e.Title) ? e.Id : e.Title);
+                    item.SubItems.Add(e.PointsValue > 0 ? e.PointsValue.ToString("N0") : "—");
+                    item.SubItems.Add(string.IsNullOrEmpty(e.Date) ? "—" : e.Date);
+                    item.Tag = e;
+                    item.ImageIndex = thumbs.Images.Count;
+                    thumbs.Images.Add(MakeThumb(e));
+                    lv.Items.Add(item);
+                }
+            }
+            finally { lv.EndUpdate(); }
+
+            if (lv.Items.Count > 0)
+            {
+                int idx = 0;
+                if (!string.IsNullOrEmpty(keepId))
+                    for (int i = 0; i < lv.Items.Count; i++)
+                        if (((CloudEntry)lv.Items[i].Tag).Id == keepId) { idx = i; break; }
+                lv.Items[idx].Selected = true;
+                lv.Items[idx].Focused = true;
+                ShowSelected();
+            }
+            else
+            {
+                preview.Image = null;
+                txtTitle.Text = "";
+                txtDesc.Text = "";
+                lblMeta.Text = "";
+                lblState.Text = "Библиотека пуста. Опубликуйте первое облако.";
+                SetButtons(false);
+            }
+            SetBusy(busy);
+        }
+
+        private Image MakeThumb(CloudEntry e)
+        {
+            string path = Pipeline.PosterPathFor(e.Id);
+            Image img = LoadImageFile(path);
+            if (img != null) return img;
+
+            Bitmap bmp = new Bitmap(56, 35);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.FromArgb(20, 24, 30));
+                string letter = string.IsNullOrEmpty(e.Title) ? "·" : e.Title.Substring(0, 1).ToUpperInvariant();
+                using (Font f = new Font("Segoe UI", 14F, FontStyle.Bold))
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(122, 167, 208)))
+                {
+                    SizeF size = g.MeasureString(letter, f);
+                    g.DrawString(letter, f, b, (56 - size.Width) / 2f, (35 - size.Height) / 2f);
+                }
+            }
+            return bmp;
+        }
+
+        private Image MakeBigPlaceholder(CloudEntry e)
+        {
+            Bitmap bmp = new Bitmap(500, 250);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.FromArgb(20, 24, 30));
+                string letter = string.IsNullOrEmpty(e.Title) ? "·" : e.Title.Substring(0, 1).ToUpperInvariant();
+                using (Font big = new Font("Segoe UI", 54F, FontStyle.Bold))
+                using (SolidBrush brush = new SolidBrush(Color.FromArgb(60, 84, 108)))
+                {
+                    SizeF s = g.MeasureString(letter, big);
+                    g.DrawString(letter, big, brush, (500 - s.Width) / 2f, (250 - s.Height) / 2f - 24);
+                }
+                using (Font small = new Font("Segoe UI", 9F))
+                using (SolidBrush brush = new SolidBrush(Color.FromArgb(120, 140, 160)))
+                {
+                    const string hint = "Превью не создано. Нажмите «Превью из LAS…»";
+                    SizeF s = g.MeasureString(hint, small);
+                    g.DrawString(hint, small, brush, (500 - s.Width) / 2f, 200);
+                }
+            }
+            return bmp;
+        }
+
+        private static Image LoadImageFile(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return null;
+                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+                using (Image tmp = Image.FromStream(fs))
+                    return new Bitmap(tmp);
+            }
+            catch (Exception) { return null; }
+        }
+
+        private CloudEntry SelectedEntry
+        {
+            get
+            {
+                if (lv.SelectedItems.Count == 0) return null;
+                return lv.SelectedItems[0].Tag as CloudEntry;
+            }
+        }
+
+        private void ShowSelected()
+        {
+            CloudEntry e = SelectedEntry;
+            if (e == null) return;
+            txtTitle.Text = e.Title;
+            txtDesc.Text = e.Description;
+
+            string link = Pipeline.BuildLink(e.Src, e.Title);
+            lblMeta.Text = string.Format("{0} точек · {1}\n{2}",
+                e.PointsValue > 0 ? e.PointsValue.ToString("N0") : "?",
+                string.IsNullOrEmpty(e.Date) ? "дата неизвестна" : e.Date,
+                e.Src);
+
+            Image img = LoadImageFile(Pipeline.PosterPathFor(e.Id));
+            if (img == null) img = MakeBigPlaceholder(e);
+            if (preview.Image != null && preview.Image != img)
+            {
+                Image old = preview.Image;
+                preview.Image = null;
+                try { old.Dispose(); } catch (Exception) { }
+            }
+            preview.Image = img;
+            SetButtons(!busy);
+        }
+
+        private void SetButtons(bool enabled)
+        {
+            bool has = enabled && SelectedEntry != null;
+            btnSave.Enabled = has;
+            btnDelete.Enabled = has;
+            btnPoster.Enabled = has;
+            btnOpen.Enabled = has;
+            btnCopy.Enabled = has;
+            btnRefresh.Enabled = enabled;
+            btnClose.Enabled = true;
+        }
+
+        private void SetBusy(bool value)
+        {
+            busy = value;
+            Cursor = value ? Cursors.WaitCursor : Cursors.Default;
+            lv.Enabled = !value;
+            txtTitle.Enabled = !value;
+            txtDesc.Enabled = !value;
+            SetButtons(!value);
+        }
+
+        private void RunGit(string message, string[] paths)
+        {
+            SetBusy(true);
+            lblState.ForeColor = Color.DimGray;
+            lblState.Text = "Отправляю изменения на GitHub...";
+            try
+            {
+                Pipeline.GitCommitPush(message, paths, delegate(string s) { lblState.Text = s; });
+                lblState.ForeColor = Color.SeaGreen;
+                lblState.Text = "Изменения опубликованы.";
+            }
+            catch (Exception ex)
+            {
+                lblState.ForeColor = Color.Firebrick;
+                lblState.Text = "Ошибка: " + ex.Message;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+        }
+
+        private void SaveEntry()
+        {
+            CloudEntry e = SelectedEntry;
+            if (e == null || busy) return;
+            string title = txtTitle.Text.Trim();
+            if (title.Length == 0)
+            {
+                MessageBox.Show(this, "Название не может быть пустым.", "Библиотека", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            try
+            {
+                Pipeline.UpdateCloud(e.Id, title, txtDesc.Text.Trim(), null, null);
+            }
+            catch (Exception ex)
+            {
+                lblState.ForeColor = Color.Firebrick;
+                lblState.Text = "Ошибка: " + ex.Message;
+                return;
+            }
+            RunGit("update pointcloud: " + title, new string[] { "clouds.json" });
+            LoadList(e.Id);
+        }
+
+        private void DeleteSelected()
+        {
+            CloudEntry e = SelectedEntry;
+            if (e == null || busy) return;
+            DialogResult r = MessageBox.Show(this,
+                "Удалить облако «" + e.Title + "»?\r\n\r\n" +
+                "Да — убрать из галереи и удалить файлы data\\" + e.Id + ".\r\n" +
+                "Нет — убрать только из списка (файлы останутся).",
+                "Удаление", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+            if (r == DialogResult.Cancel) return;
+
+            bool deleteFiles = r == DialogResult.Yes;
+            try
+            {
+                Pipeline.DeleteCloud(e.Id, deleteFiles);
+            }
+            catch (Exception ex)
+            {
+                lblState.ForeColor = Color.Firebrick;
+                lblState.Text = "Ошибка удаления: " + ex.Message;
+                return;
+            }
+            RunGit("remove pointcloud: " + e.Title, deleteFiles
+                ? new string[] { "clouds.json", "data/" + e.Id }
+                : new string[] { "clouds.json" });
+            LoadList(null);
+        }
+
+        private void MakePosterForSelected()
+        {
+            CloudEntry e = SelectedEntry;
+            if (e == null || busy) return;
+
+            string las = null;
+            using (OpenFileDialog d = new OpenFileDialog())
+            {
+                d.Title = "Выберите LAS/LAZ для превью «" + e.Title + "»";
+                d.Filter = "Облака точек|*.las;*.laz|Все файлы|*.*";
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                las = d.FileName;
+            }
+            if (string.Equals(Path.GetExtension(las), ".laz", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(this, "Превью строится из .las. Распакуйте .laz в .las или укажите исходный .las.",
+                    "Превью", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            SetBusy(true);
+            lblState.ForeColor = Color.DimGray;
+            lblState.Text = "Строю превью...";
+            bool ok = false;
+            try
+            {
+                ok = Pipeline.MakePoster(las, e.Id, delegate(string s) { lblState.Text = s; });
+            }
+            catch (Exception ex)
+            {
+                lblState.Text = "Ошибка: " + ex.Message;
+            }
+            finally { SetBusy(false); }
+
+            if (!ok)
+            {
+                lblState.ForeColor = Color.Firebrick;
+                lblState.Text = "Превью не создано.";
+                return;
+            }
+            try
+            {
+                Pipeline.UpdateCloud(e.Id, e.Title, e.Description, "data/" + e.Id + "/poster.png", null);
+            }
+            catch (Exception ex)
+            {
+                lblState.ForeColor = Color.Firebrick;
+                lblState.Text = "Ошибка: " + ex.Message;
+                return;
+            }
+            RunGit("poster for pointcloud: " + e.Title,
+                new string[] { "clouds.json", "data/" + e.Id + "/poster.png" });
+            LoadList(e.Id);
+        }
+
+        private void OpenSelected()
+        {
+            CloudEntry e = SelectedEntry;
+            if (e == null) return;
+            Pipeline.TryOpen(Pipeline.BuildLink(e.Src, e.Title));
+        }
+
+        private void CopyLink()
+        {
+            CloudEntry e = SelectedEntry;
+            if (e == null) return;
+            try
+            {
+                Clipboard.SetText(Pipeline.BuildLink(e.Src, e.Title));
+                lblState.ForeColor = Color.SeaGreen;
+                lblState.Text = "Ссылка скопирована.";
+            }
+            catch (Exception) { }
         }
     }
 

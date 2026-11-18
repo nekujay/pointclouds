@@ -2,5 +2,6 @@ tools/
 *.exe
 *.pdb
 *.log
+settings.json
 Thumbs.db
 .DS_Store
