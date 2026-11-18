@@ -1,5 +1,13 @@
 [
   {
+    "id": "kavalergardskaya-lk2",
+    "title": "Кавалергардская, ЛК 2",
+    "description": "Скан лестничной клетки, FARO Scanner1, сетка 1 см",
+    "src": "data/kavalergardskaya-lk2/cloud.js",
+    "points": 9566104,
+    "date": "2026-11-18"
+  },
+  {
     "id": "sample",
     "title": "Демо-облако (тест)",
     "description": "Тестовое облако из комплекта Potree. Удали его через админку, когда добавишь своё.",
