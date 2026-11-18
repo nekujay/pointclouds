@@ -5,6 +5,7 @@
   [string]$Description = "",
   [ValidateSet("web", "hq", "preview")][string]$Profile = "web",
   [double]$Spacing = 0,
+  [double]$Voxel = 0,
   [string]$Poster = "",
   [string]$Rcp = "",
   [string]$Remote = "",
@@ -72,7 +73,33 @@ Write-Host "  название: $Title"
 Write-Host ""
 
 # ---------- конвертация ----------
-$convParams = @{ InputPath = $inFile.FullName; Id = $Id; Profile = $Profile }
+$convertSource = $inFile.FullName
+$tempLas = $null
+
+if ($Voxel -gt 0) {
+  if ($ext -ne ".las") {
+    Write-Host "  Прореживание (-Voxel) поддерживается только для .las — пропускаю." -ForegroundColor Yellow
+  } else {
+    $decimator = Join-Path $root "decimate.py"
+    $hasPython = $null -ne (Get-Command python -ErrorAction SilentlyContinue)
+    if (-not (Test-Path -LiteralPath $decimator)) {
+      Write-Host "  Не найден decimate.py — прореживание пропущено." -ForegroundColor Yellow
+    } elseif (-not $hasPython) {
+      Write-Host "  Python не найден — прореживание пропущено." -ForegroundColor Yellow
+    } else {
+      $tempLas = Join-Path ([IO.Path]::GetTempPath()) ("$Id-voxel.las")
+      Write-Host ("  Прореживаю воксельной сеткой {0:0} мм..." -f ($Voxel * 1000)) -ForegroundColor Cyan
+      & python $decimator $inFile.FullName $tempLas $Voxel
+      if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tempLas)) {
+        throw "Прореживание не удалось (код $LASTEXITCODE)"
+      }
+      $convertSource = $tempLas
+      Write-Host ("  после прореживания: {0} МБ" -f [math]::Round((Get-Item -LiteralPath $tempLas).Length / 1MB, 1)) -ForegroundColor Green
+    }
+  }
+}
+
+$convParams = @{ InputPath = $convertSource; Id = $Id; Profile = $Profile }
 if ($Spacing -gt 0) { $convParams["Spacing"] = $Spacing }
 
 & (Join-Path $root "convert.ps1") @convParams
@@ -80,6 +107,10 @@ if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) { throw "Конверта�
 
 $cloudJs = Join-Path $root ("data\$Id\cloud.js")
 if (-not (Test-Path -LiteralPath $cloudJs)) { throw "Не найден результат конвертации: $cloudJs" }
+
+if ($tempLas -and (Test-Path -LiteralPath $tempLas)) {
+  Remove-Item -LiteralPath $tempLas -Force -ErrorAction SilentlyContinue
+}
 
 $points = 0
 try { $points = [int]((Get-Content -LiteralPath $cloudJs -Raw -Encoding UTF8 | ConvertFrom-Json).points) } catch { }
